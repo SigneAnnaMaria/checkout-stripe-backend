@@ -33,20 +33,34 @@ app.listen(port, () => {
 app.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body
-    const hashedPassword = await bcrypt.hash(password, 10)
 
-    const users = JSON.parse(fs.readFileSync(usersFile, 'utf-8'))
-    users[email] = { email, password: hashedPassword }
-    try {
-      fs.writeFileSync(usersFile, JSON.stringify(users))
-      console.log('Data written to users.json successfully')
-    } catch (error) {
-      console.error('Error writing to users.json:', error)
+    const usersData = fs.readFileSync(usersFile, 'utf-8')
+    const users = JSON.parse(usersData)
+
+    if (users.hasOwnProperty(email)) {
+      return res.status(409).send('User already exists with this email')
     }
 
-    res.status(201).send('User registered successfully')
+    const hashedPassword = await bcrypt.hash(password, 10)
+
+    const customer = await stripe.customers.create({
+      email: email,
+    })
+
+    users[email] = {
+      email,
+      password: hashedPassword,
+      stripeCustomerId: customer.id,
+    }
+
+    fs.writeFileSync(usersFile, JSON.stringify(users, null, 2))
+
+    res.status(201).send({
+      message: 'User registered successfully',
+      customerId: customer.id,
+    })
   } catch (error) {
-    res.status(500).send(`Error registering user:  ${error.message}`)
+    res.status(500).send(`Error registering user: ${error.message}`)
   }
 })
 
@@ -106,22 +120,28 @@ app.post('/cart/remove', (req, res) => {
 
 app.post('/create-checkout-session', async (req, res) => {
   try {
-    console.log('place order req', req.body)
-    const { items } = req.body 
+    const { items, userEmail } = req.body 
 
-    const lineItems = items.map((item) => {
-      return {
-        price: item.priceId,
-        quantity: item.quantity,
-      }
+    const customers = await stripe.customers.list({
+      email: userEmail,
     })
-    console.log('place order 2')
+    if (customers.data.length === 0) {
+      return res.status(404).json({ error: 'Customer not found' })
+    }
+    const customerId = customers.data[0].id
+    console.log('customerId', customerId)
+    const lineItems = items.map((item) => ({
+      price: item.priceId,
+      quantity: item.quantity,
+    }))
+
     const session = await stripe.checkout.sessions.create({
+      customer: customerId, 
       payment_method_types: ['card'],
       line_items: lineItems,
       mode: 'payment',
-      success_url: `${req.headers.origin}/checkout-success`, 
-      cancel_url: `${req.headers.origin}/checkout-failed`, 
+      success_url: `${req.headers.origin}/checkout-success`,
+      cancel_url: `${req.headers.origin}/checkout-cancelled`,
     })
 
     res.status(200).json({ sessionId: session.id })
@@ -132,8 +152,8 @@ app.post('/create-checkout-session', async (req, res) => {
 
 app.post('/confirm-order', async (req, res) => {
   try {
-    const orderDetails = req.body
-    const user = orderDetails.user
+    const orderDetails = req.body 
+    const user = orderDetails.user 
     console.log('orderDetails', orderDetails)
     console.log('user', user)
     let orders = {}
